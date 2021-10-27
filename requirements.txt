@@ -1,0 +1,4 @@
+terraform-compliance
+invoke
+requests
+PyGithub

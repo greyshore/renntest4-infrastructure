@@ -1,0 +1,226 @@
+---
+orbs:
+  azure-cli: circleci/azure-cli@1.0.0
+  slack: circleci/slack@4.4.4
+version: 2.1
+
+parameters:
+  cohort_repo_base:
+    type: string
+    default: renntest4
+  static_web_storage_account_name:
+    type: string
+    default: "strenntest4"
+  resource_group_name:
+    type: string
+    default: "RENNTEST_4"
+  backend_resource_group_name:
+    type: string
+    default: "UTILS"
+  backend_storage_account_name:
+    type: string
+    default: "greyshoretfstate"
+  backend_container_name:
+    type: string
+    default: "edde-platform-deployment"
+  circleci_vcs_type:
+    type: string
+    default: github
+  circleci_organization:
+    type: string
+    default: greyshore
+  cohort_context_name:
+    type: string
+    default: renntest_4-context
+
+executors:
+  docker-executor:
+    docker:
+      - image: cimg/python:3.9.6
+    environment:
+        ARM_CLIENT_ID: dd66148a-c62e-4995-918f-384275fffa0a
+        ARM_SUBSCRIPTION_ID: fec422e4-40ce-401c-a664-965211904b08
+        ARM_TENANT_ID: 5a7488ef-bfb1-464f-ae6f-d2a9f14cd609
+
+jobs:
+  plan:
+    working_directory: ~/project
+    executor: docker-executor
+    steps:
+      - checkout
+      - azure-cli/install
+      - run:
+          executor: azure-cli/default
+          command: az -v
+          name: Verify Azure CLI is installed
+      - azure-cli/login-with-service-principal
+      - run:
+          command: |
+            sudo apt-get update && sudo apt-get install -y gnupg software-properties-common curl
+            curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+            sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+            sudo apt-get update && sudo apt-get install terraform
+          name: Install Terraform
+      - run:
+          name: terraform init & plan
+          command: |
+            terraform init -input=false \
+            -backend-config="resource_group_name=<< pipeline.parameters.backend_resource_group_name >>" \
+            -backend-config="storage_account_name=<< pipeline.parameters.backend_storage_account_name >>" \
+            -backend-config="container_name=<< pipeline.parameters.backend_container_name >>" \
+            -backend-config="key=renntest_4.tfstate"
+
+            terraform plan -var static_web_storage_account_name=<< pipeline.parameters.static_web_storage_account_name >> \
+            -var resource_group_name=<< pipeline.parameters.resource_group_name >> \
+            -out tf.plan
+      - run:
+          name: Install Terraform-Compliance Dependencies
+          command: sudo apt-get install libxslt-dev libxml2-dev
+      - run:
+          name: Install Terraform-Compliance
+          command: pip3 install -r requirements.txt
+      - run:
+          name: Run Terraform Compliance Check
+          command: terraform-compliance -f features -p tf.plan -S
+      - persist_to_workspace:
+          root: ~/project
+          paths:
+            - tf.plan
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+
+  apply:
+    working_directory: ~/project
+    executor: docker-executor
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/project
+      - azure-cli/install
+      - run:
+          executor: azure-cli/default
+          command: az -v
+          name: Verify Azure CLI is installed
+      - azure-cli/login-with-service-principal
+      - run:
+          command: |
+            sudo apt-get update && sudo apt-get install -y gnupg software-properties-common curl
+            curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+            sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+            sudo apt-get update && sudo apt-get install terraform
+          name: Install Terraform
+      - run:
+          name: terraform init and apply
+          command: |
+            terraform init -input=false \
+            -backend-config="resource_group_name=<< pipeline.parameters.backend_resource_group_name >>" \
+            -backend-config="storage_account_name=<< pipeline.parameters.backend_storage_account_name >>" \
+            -backend-config="container_name=<< pipeline.parameters.backend_container_name >>" \
+            -backend-config="key=renntest_4.tfstate"
+            terraform apply \
+              --auto-approve tf.plan
+      - run:
+          name: Set context variables for Static Web SAS
+          command: |
+            SAS_TOKEN=$(terraform output -raw static_web_container_sas_url_query_string)
+            python circleci.py "create" "$de_circleci_api_token" "gh/<< pipeline.parameters.circleci_organization >>" "<< pipeline.parameters.cohort_context_name >>" "AZURE_STORAGE_SAS_TOKEN" "$SAS_TOKEN"
+            python circleci.py "create" "$de_circleci_api_token" "gh/<< pipeline.parameters.circleci_organization >>" "<< pipeline.parameters.cohort_context_name >>" "AZURE_STORAGE_ACCOUNT" "<< pipeline.parameters.static_web_storage_account_name >>"
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+
+  destroy:
+    working_directory: ~/project
+    executor: docker-executor
+    steps:
+      - checkout
+      - azure-cli/install
+      - run:
+          executor: azure-cli/default
+          command: az -v
+          name: Verify Azure CLI is installed
+      - azure-cli/login-with-service-principal
+      - run:
+          command: |
+            sudo apt-get update && sudo apt-get install -y gnupg software-properties-common curl
+            curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
+            sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
+            sudo apt-get update && sudo apt-get install terraform
+          name: Install Terraform
+      - run:
+          name: terraform destroy
+          command: |
+            terraform init -input=false \
+            -backend-config="resource_group_name=<< pipeline.parameters.backend_resource_group_name >>" \
+            -backend-config="storage_account_name=<< pipeline.parameters.backend_storage_account_name >>" \
+            -backend-config="container_name=<< pipeline.parameters.backend_container_name >>" \
+            -backend-config="key=renntest_4.tfstate"
+            terraform destroy -var static_web_storage_account_name=<< pipeline.parameters.static_web_storage_account_name >> \
+            -var resource_group_name=<< pipeline.parameters.resource_group_name >> \
+            --auto-approve
+      - run:
+          name: terraform state removal
+          command: |
+            ./state_cleanup.sh << pipeline.parameters.backend_storage_account_name >> \
+            << pipeline.parameters.backend_container_name >> \
+            renntest_4.tfstate
+      - run:
+          name: Install Python packages for clean up steps
+          command: pip3 install -r requirements.txt
+      - run:
+          name: Remove CircleCI context for Cohort
+          command: |
+            python circleci.py "destroy" "$de_circleci_api_token" "gh/<< pipeline.parameters.circleci_organization >>" "<< pipeline.parameters.cohort_context_name >>"
+      - run:
+          name: Archive Github repos
+          command: |
+            python repos.py "$de_github_token" "<< pipeline.parameters.circleci_organization >>" "<< pipeline.parameters.cohort_repo_base >>-infrastructure"
+            python repos.py "$de_github_token" "<< pipeline.parameters.circleci_organization >>" "<< pipeline.parameters.cohort_repo_base >>-app"
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+
+workflows:
+  version: 2
+  Terraform Plan and Apply:
+    jobs:
+      - plan:
+          context:
+            - greyshore-sandbox
+            - slack-secrets
+      - slack/on-hold:
+          context: slack-secrets
+          requires:
+            - plan
+      - request approval:
+          type: approval
+          requires:
+            - plan
+            - slack/on-hold
+      - apply:
+          requires:
+            - request approval
+          context:
+            - greyshore-sandbox
+            - circleci
+            - slack-secrets
+            - circleci-context-management
+  Terraform Destroy:
+    jobs:
+      - destroy approval:
+          type: approval
+      - destroy confirmation:
+          type: approval
+          requires:
+            - destroy approval
+      - destroy:
+          requires:
+            - destroy confirmation
+          context:
+            - authorized-approvers
+            - greyshore-sandbox
+            - circleci
+            - slack-secrets
+            - circleci-context-management
+            - edde-github-repo-access
